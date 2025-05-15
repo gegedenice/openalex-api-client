@@ -14,7 +14,7 @@ A Python client for interacting with the OpenAlex API, providing easy access to 
 ## Installation
 
 ```bash
-pip install openalex-api-client
+pip install git+https://github.com/gegedenice/openalex-api-client
 ```
 
 ## Quick Start
@@ -161,6 +161,15 @@ Example of digested work:
     # ... other fields
 }
 ```
+
+### Data Processing Notes
+
+- **Display Names Limitation**: To prevent massive data loads and improve performance, the system limits display names (authors, institutions, topics, etc.) to the first 10 entries per category. This applies to:
+  - Author names
+  - Institution names
+  - Topics
+  - Keywords
+  - Sustainable Development Goals
 
 ## Error Handling
 

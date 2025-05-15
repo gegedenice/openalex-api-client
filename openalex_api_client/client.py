@@ -159,7 +159,11 @@ class OpenAlexParser:
                     if path not in display_names:
                         display_names[path] = []
                     display_names[path].append(value)
-
+            # After collecting all values, limit to first 10 if needed (preventing massive authorships for example)
+            for path in display_names:
+                if len(display_names[path]) > 10:
+                    display_names[path] = display_names[path][:10]
+                    
             for path, values in display_names.items():
                 parsed_data[path.replace(".","_")] = "|".join(values)
         except Exception as e:
