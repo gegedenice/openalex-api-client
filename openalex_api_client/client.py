@@ -62,7 +62,19 @@ class OpenAlexParser:
             return None
 
     @staticmethod
-    def parse_work(work_data):
+    def extract_abstract(abstract_inverted_index):
+        """Convert an abstract_inverted_index into a readable text format."""
+        if not abstract_inverted_index:
+            return "No abstract available"
+        abstract_length = max(max(pos) for pos in abstract_inverted_index.values()) + 1
+        abstract_words = [""] * abstract_length
+        for word, positions in abstract_inverted_index.items():
+            for pos in positions:
+                abstract_words[pos] = word
+        return " ".join(word for word in abstract_words if word)
+
+    @staticmethod
+    def parse_work(work_data, include_abstract=False):
         """Parses a work JSON object into a digested format."""
         parsed_data = {}
         
@@ -169,7 +181,15 @@ class OpenAlexParser:
         except Exception as e:
             logging.warning(f"Error parsing display_names: {e}")
 
+        # Abstract
+        if include_abstract:
+            try:
+                parsed_data['abstract'] = OpenAlexParser.extract_abstract(work_data.get('abstract_inverted_index'))
+            except Exception as e:
+                logging.warning(f"Error parsing abstract: {e}")
         return OpenAlexParser.merge_and_deduplicate(parsed_data)
+
+
 
 class OpenAlexClient:
     """
@@ -225,7 +245,7 @@ class OpenAlexClient:
                     error_message += f"\nResponse Text: {e.response.text[:500]}..."
             raise OpenAlexClientError(error_message) from e
 
-    def get_resource(self, api_endpoint, resource_id, digest=False):
+    def get_resource(self, api_endpoint, resource_id, digest=False, abstract=False):
         """
         Fetches a single resource by its ID from a specified endpoint.
 
@@ -233,6 +253,7 @@ class OpenAlexClient:
             api_endpoint (str): The API endpoint name (e.g., "works", "authors").
             resource_id (str): The unique ID of the resource.
             digest (bool): If True, returns digested data using OpenAlexParser.
+            abstract (bool): If True, returns the abstract inside digested data.
 
         Returns:
             dict: The JSON representation of the resource or digested data if digest=True.
@@ -244,16 +265,17 @@ class OpenAlexClient:
         data = response.json()
         
         if digest and api_endpoint == self.WORKS:
-            return OpenAlexParser.parse_work(data)
+            return OpenAlexParser.parse_work(data, include_abstract=abstract)
         return data
 
-    def list_resources(self, api_endpoint, digest=False, **kwargs):
+    def list_resources(self, api_endpoint, digest=False, abstract=False, **kwargs):
         """
         Fetches a single page of resources from an API endpoint.
 
         Args:
             api_endpoint (str): The API endpoint name (e.g., "works", "authors").
             digest (bool): If True, returns digested data using OpenAlexParser.
+            abstract (bool): If True, returns the abstract inside digested data.
             **kwargs: Query parameters (page, per_page, sort_by, etc.).
 
         Returns:
@@ -269,7 +291,8 @@ class OpenAlexClient:
         data = response.json()
         
         if digest and api_endpoint == self.WORKS:
-            data['results'] = [OpenAlexParser.parse_work(work) for work in data.get('results', [])]
+            #data['results'] = [OpenAlexParser.parse_work(work) for work in data.get('results', [])]
+            data['results'] = [OpenAlexParser.parse_work(work, include_abstract=abstract) for work in data.get('results', [])]
         return data.get('results', [])
 
     def get_total_count(self, api_endpoint, **kwargs):
@@ -296,13 +319,14 @@ class OpenAlexClient:
             logging.error(f"Error getting total count: {str(e)}")
             return 0
 
-    def list_all_resources(self, api_endpoint, digest=False, per_page=None, **kwargs):
+    def list_all_resources(self, api_endpoint, digest=False, abstract=False, per_page=None, **kwargs):
         """
         Fetches ALL resources from an endpoint, handling pagination.
 
         Args:
             api_endpoint (str): The API endpoint name (e.g., "works", "authors").
             digest (bool): If True, returns digested data using OpenAlexParser.
+            abstract (bool): If True, returns the abstract inside digested data.
             per_page (int, optional): Results per page. Defaults to client's default_per_page.
             **kwargs: Additional query parameters (filter, sort, select).
                       'page' parameter is ignored as pagination is handled internally.
@@ -329,7 +353,7 @@ class OpenAlexClient:
         # Fetch all pages
         for page in range(1, total_pages + 1):
             try:
-                response = self.list_resources(api_endpoint, digest=digest, page=page, per_page=per_page, **kwargs)
+                response = self.list_resources(api_endpoint, digest=digest, abstract=abstract, page=page, per_page=per_page, **kwargs)
                 if response:
                     all_records.extend(response)
                     logging.info(f"Fetched page {page}/{total_pages} - Total records so far: {len(all_records)}")
@@ -344,17 +368,17 @@ class OpenAlexClient:
         return all_records
 
     # Convenience methods for common endpoints
-    def get_work(self, work_id, digest=False):
+    def get_work(self, work_id, digest=False, abstract=False,):
         """Fetches a single work by ID."""
-        return self.get_resource(self.WORKS, work_id, digest=digest)
+        return self.get_resource(self.WORKS, work_id, digest=digest, abstract=abstract)
 
-    def list_works(self, digest=False, **kwargs):
+    def list_works(self, digest=False, abstract=False, **kwargs):
         """Fetches a single page of works."""
-        return self.list_resources(self.WORKS, digest=digest, **kwargs)
+        return self.list_resources(self.WORKS, digest=digest, abstract=abstract, **kwargs)
 
-    def list_all_works(self, digest=False, per_page=None, **kwargs):
+    def list_all_works(self, digest=False, abstract=False,per_page=None, **kwargs):
         """Fetches ALL works, handling pagination."""
-        return self.list_all_resources(self.WORKS, digest=digest, per_page=per_page, **kwargs)
+        return self.list_all_resources(self.WORKS, digest=digest, abstract=abstract, per_page=per_page, **kwargs)
 
     # -- Institutions --
     def get_institution(self, institution_id):
@@ -423,6 +447,4 @@ class OpenAlexClient:
     def list_all_publishers(self, per_page=None, **kwargs):
         """Fetches ALL resource classes, handling pagination."""
         return self.list_all_resources(self.PUBLISHERS, per_page=per_page, **kwargs)
-    # Add more convenience methods for other endpoints as needed...
-
 

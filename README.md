@@ -7,6 +7,7 @@ A Python client for interacting with the OpenAlex API, providing easy access to 
 - Simple and intuitive interface for OpenAlex API
 - Automatic pagination handling
 - Data digestion for works (simplified, flattened format)
+- Optional inclusion of work abstracts in digested output
 - Support for all OpenAlex endpoints (works, authors, institutions, etc.)
 - Comprehensive filtering and sorting options
 - Error handling and logging
@@ -26,14 +27,25 @@ from openalex_api_client import OpenAlexClient
 client = OpenAlexClient(email="your.email@example.com")
 
 # Get a single work
-work = client.get_work("W1234567890")
+work = client.get_work("W2741809807")
 
 # Get a digested version of a work (simplified format)
-digested_work = client.get_work("W1234567890", digest=True)
+digested_work = client.get_work("W2741809807", digest=True)
+
+# Get digested work with abstract included
+digested_with_abstract = client.get_work("W2741809807", digest=True, abstract=True)
 
 # List works with filters
 works = client.list_works(
     filter="publication_year:2020,is_oa:true",
+    per_page=25
+)
+
+# List digested works with abstract
+works = client.list_works(
+    digest=True,
+    abstract=True,
+    filter="publication_year:2020",
     per_page=25
 )
 
@@ -63,6 +75,9 @@ client = OpenAlexClient(
 # Get a single work
 work = client.get_work(work_id, digest=False)
 
+# Get digested work with optional abstract
+digested_work = client.get_work(work_id, digest=True, abstract=True)
+
 # Get a single author
 author = client.get_author(author_id)
 
@@ -77,7 +92,8 @@ works = client.list_works(
     filter="publication_year:2020",
     sort="cited_by_count:desc",
     per_page=25,
-    digest=True
+    digest=True,
+    abstract=True
 )
 
 # List authors
@@ -93,7 +109,8 @@ authors = client.list_authors(
 all_works = client.list_all_works(
     filter="publication_year:2020",
     per_page=100,
-    digest=True
+    digest=True,
+    abstract=True
 )
 
 # Get all institutions
@@ -145,6 +162,7 @@ When using `digest=True`, works are transformed into a simplified format with:
 - Consistent field names
 - Merged arrays
 - Standardized date formats
+- Optional abstract field when abstract=True
 
 Example of digested work:
 ```python
@@ -158,6 +176,7 @@ Example of digested work:
     "open_access_oa_status": "gold",
     "countries_codes": "FR|US|DE",
     "authorships_display_name": "Author 1|Author 2|Author 3",
+	"abstract": "This paper presents...",  # Only if abstract=True
     # ... other fields
 }
 ```
