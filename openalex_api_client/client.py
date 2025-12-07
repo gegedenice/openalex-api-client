@@ -219,6 +219,9 @@ class OpenAlexClient:
         self.headers = {
             'Accept': 'application/json',
         }
+        # Use a session for connection pooling and better Brotli handling
+        self.session = requests.Session()
+        self.session.headers.update(self.headers)
         logging.info(f"OpenAlexClient initialized with email: {self.email}")
 
     def _build_params(self, **kwargs):
@@ -230,7 +233,8 @@ class OpenAlexClient:
     def _request(self, method, url, params=None, **kwargs):
         """Makes an HTTP request to the OpenAlex API."""
         try:
-            response = requests.request(method, url, headers=self.headers, params=params, **kwargs)
+            # Use session instead of requests.request for better connection handling
+            response = self.session.request(method, url, params=params, **kwargs)
             response.raise_for_status()
             return response
         except requests.exceptions.RequestException as e:
@@ -401,7 +405,7 @@ class OpenAlexClient:
         """Fetches a single item set (collection) by ID."""
         return self.get_resource(self.AUTHORS, author_id)
 
-    def list_item_authors(self, **kwargs):
+    def list_authors(self, **kwargs):
         """Fetches a single page of item sets (collections)."""
         return self.list_resources(self.AUTHORS, **kwargs)
 
