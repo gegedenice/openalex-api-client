@@ -30,7 +30,7 @@ setup(
         "requests>=2.25.0",
         "pandas>=1.2.0",
         "numpy>=1.19.0",
-        "urllib3[brotli]>=2.2.5"
+        "urllib3[brotli]>=2.6.0"
     ],
     project_urls={
         "Bug Reports": "https://github.com/gegedenice/openalex-api-client/issues",
