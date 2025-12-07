@@ -189,8 +189,6 @@ class OpenAlexParser:
                 logging.warning(f"Error parsing abstract: {e}")
         return OpenAlexParser.merge_and_deduplicate(parsed_data)
 
-
-
 class OpenAlexClient:
     """
     A Python client for interacting with the OpenAlex API.
@@ -218,8 +216,9 @@ class OpenAlexClient:
         self.default_per_page = default_per_page
         self.headers = {
             'Accept': 'application/json',
+            'Accept-Encoding': 'gzip, deflate',  # Explicitly disable Brotli as it's not supported by the API
         }
-        # Use a session for connection pooling and better Brotli handling
+        # Use a session for connection pooling
         self.session = requests.Session()
         self.session.headers.update(self.headers)
         logging.info(f"OpenAlexClient initialized with email: {self.email}")
