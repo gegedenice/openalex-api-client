@@ -203,7 +203,7 @@ class OpenAlexClient:
     FUNDERS = "funders"
     PUBLISHERS = "publishers"
 
-    def __init__(self, api_key: str = None, default_per_page=10):
+    def __init__(self, api_key: str = None, include_xpack: bool = False, default_per_page=10):
         """
         Initializes the OpenAlexClient.
 
@@ -213,6 +213,7 @@ class OpenAlexClient:
         """
         self.base_url = "https://api.openalex.org"
         self.api_key = api_key
+        self.include_xpack = include_xpack
         self.default_per_page = default_per_page
         self.headers = {
             'Accept': 'application/json',
@@ -225,7 +226,7 @@ class OpenAlexClient:
 
     def _build_params(self, **kwargs):
         """Helper to build request parameters, including API keys."""
-        params = {"api_key": self.api_key}
+        params = {"api_key": self.api_key, "include_xpack": self.include_xpack}
         params.update({k: v for k, v in kwargs.items() if v is not None})
         return params
 
