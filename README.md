@@ -153,6 +153,33 @@ total_works = client.get_total_count(
 "publication_year:2020,is_oa:true,type:journal-article,institutions.country_code:FR"
 ```
 
+### Main endpoints
+
+- Works
+  - `client.get_work()`
+  - `client.list_works()`
+  - `client.list_all_works()`
+- Institutions
+  - `client.get_institution()`
+  - `client.list_institutions()`
+  - `client.list_all_institutions()`
+- Authors
+  - `client.get_author()`
+  - `client.list_authors()`
+  - `client.list_all_authors()`
+- Topics
+  - `client.get_topic()`
+  - `client.list_topics()`
+  - `client.list_all_topics()`
+- Funders
+  - `client.get_funder()`
+  - `client.list_funders()`
+  - `client.list_all_funders()`
+- Publishers
+  - `client.get_publisher()`
+  - `client.list_publishers()`
+  - `client.list_all_publishers()`
+
 ### Data Digestion
 
 When using `digest=True`, works are transformed into a simplified format with:
@@ -211,3 +238,7 @@ The client uses Python's logging module. Configure logging as needed:
 import logging
 logging.basicConfig(level=logging.INFO)
 ```
+
+## TODO
+
+- Add awards entities
