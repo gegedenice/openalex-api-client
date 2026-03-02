@@ -57,6 +57,11 @@ all_works = client.list_all_works(
 )
 ```
 
+Note: the XPACK expansion pack is excluded by default as in the native API, but can be included with the param `include_xpack=True`
+```
+client = OpenAlexClient(api_key="your API Key", include_xpack=True)
+```
+
 ## API Reference
 
 ### Client Initialization
