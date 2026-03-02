@@ -203,16 +203,16 @@ class OpenAlexClient:
     FUNDERS = "funders"
     PUBLISHERS = "publishers"
 
-    def __init__(self, email: str = None, default_per_page=10):
+    def __init__(self, api_key: str = None, default_per_page=10):
         """
         Initializes the OpenAlexClient.
 
         Args:
-            email (str, optional): Email for API identification. Defaults to None.
+            api_key (str, optional): api_key for API identification. Defaults to None.
             default_per_page (int): Default number of results per page. Defaults to 10.
         """
         self.base_url = "https://api.openalex.org"
-        self.email = email
+        self.api_key = api_key
         self.default_per_page = default_per_page
         self.headers = {
             'Accept': 'application/json',
@@ -221,11 +221,11 @@ class OpenAlexClient:
         # Use a session for connection pooling
         self.session = requests.Session()
         self.session.headers.update(self.headers)
-        logging.info(f"OpenAlexClient initialized with email: {self.email}")
+        logging.info(f"OpenAlexClient initialized with api_key: {self.api_key}")
 
     def _build_params(self, **kwargs):
         """Helper to build request parameters, including API keys."""
-        params = {"mailto": self.email}
+        params = {"api_key": self.api_key}
         params.update({k: v for k, v in kwargs.items() if v is not None})
         return params
 

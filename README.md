@@ -24,7 +24,7 @@ pip install git+https://github.com/gegedenice/openalex-api-client
 from openalex_api_client import OpenAlexClient
 
 # Initialize the client
-client = OpenAlexClient(email="your.email@example.com")
+client = OpenAlexClient(api_key="your API Key")
 
 # Get a single work
 work = client.get_work("W2741809807")
@@ -63,7 +63,7 @@ all_works = client.list_all_works(
 
 ```python
 client = OpenAlexClient(
-    email="your.email@example.com",  # Optional, but recommended
+    api_keyl="your API Key",  # Optional, but recommended
     default_per_page=10              # Optional, defaults to 10
 )
 ```
