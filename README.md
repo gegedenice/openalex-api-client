@@ -63,7 +63,7 @@ all_works = client.list_all_works(
 
 ```python
 client = OpenAlexClient(
-    api_keyl="your API Key",  # Optional, but recommended
+    api_key="your API Key",  # Optional, but recommended. See https://developers.openalex.org/guides/authentication
     default_per_page=10              # Optional, defaults to 10
 )
 ```
