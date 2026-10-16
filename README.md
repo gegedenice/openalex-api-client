@@ -193,6 +193,8 @@ write_parquet(tables, "data/tables")
 - `reconstruct_abstract()` returns `None` when there is no abstract.
 - Missing nested objects give nulls; a malformed record is skipped with a warning naming its ID.
 - `funders` reads the older `grants` list and the newer `awards` + `funders` lists.
+- List results keep at most 100 authors per work, silently. `authors_truncated` is True for works
+  with 100 or more authorships; re-read them with `oa.get("works", id, select="id,authorships")`.
 
 ## Logging
 
@@ -218,15 +220,16 @@ silently returning partial results or `0`. Use `tidy.works_tables` instead of di
   their messages are surfaced in `HTTPError.validation`.
 - `authorships.institutions.lineage` has no known OQL equivalent: `institution is (…)` may match the
   exact institution only. Harvests that need child units stay on classic filters.
+- Author lists in list results are cut at 100 without any flag: a work with 2,467 authors came back
+  with 100 authorships, no `is_authors_truncated` key and no `authors_count` field (the singleton
+  `get` returned all 2,467). `tidy` therefore sets `authors_truncated = True` when a work has
+  100 or more authorships (unless OpenAlex sends `is_authors_truncated` or `authors_count`), so
+  the caller can re-read those works with `oa.get("works", id, select="id,authorships")`, which
+  is free. `n_authors` is only exact after that re-read.
 
 Still assumed:
 
 - `select` accepts root-level fields only.
-- Author lists in list results. Works filtered with `authors_count:>100` and `authors_count:>150`
-  came back with 100 and 150 authorships and no truncation flag (no `is_authors_truncated` key).
-  `tidy` therefore takes `n_authors` from `authors_count` when the record has it, else from the
-  length of `authorships`; `authors_truncated` is `is_authors_truncated` if present, else
-  `authors_count > len(authorships)`, else null.
 
 ## Tests
 
