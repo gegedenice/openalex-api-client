@@ -17,8 +17,8 @@ The core depends on `requests` only. The tables need the `[tables]` extra (panda
 ## Installation
 
 ```bash
-pip install "openalex-api-client @ git+https://github.com/gegedenice/openalex-api-client@v1.0.0"
-pip install "openalex-api-client[tables] @ git+https://github.com/gegedenice/openalex-api-client@v1.0.0"
+pip install "openalex-api-client @ git+https://github.com/gegedenice/openalex-api-client@v1.0.1"
+pip install "openalex-api-client[tables] @ git+https://github.com/gegedenice/openalex-api-client@v1.0.1"
 ```
 
 Python ≥ 3.10.
@@ -192,6 +192,8 @@ write_parquet(tables, "data/tables")
 - IDs are in short form (`W123`, `I456`, `T789`, `A…`; `1105` for subfields). DOIs are bare (`10.…`).
 - `reconstruct_abstract()` returns `None` when there is no abstract.
 - Missing nested objects give nulls; a malformed record is skipped with a warning naming its ID.
+- Lone UTF-16 surrogates found in some OpenAlex texts (which Parquet cannot store) are replaced
+  with U+FFFD.
 - `funders` reads the older `grants` list and the newer `awards` + `funders` lists.
 - List results keep at most 100 authors per work, silently. `authors_truncated` is True for works
   with 100 or more authorships; re-read them with `oa.get("works", id, select="id,authorships")`.

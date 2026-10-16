@@ -46,6 +46,18 @@ DTYPES = {
 }
 
 
+def _valid_text(value):
+    """OpenAlex text can hold lone UTF-16 surrogates (e.g. a half math symbol), which pyarrow
+    cannot encode. Replace them with U+FFFD; valid strings are returned unchanged."""
+    if not isinstance(value, str):
+        return value
+    try:
+        value.encode("utf-8")
+        return value
+    except UnicodeEncodeError:
+        return value.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
+
+
 def reconstruct_abstract(inverted_index):
     """Rebuild an abstract from OpenAlex's `abstract_inverted_index`; `None` when absent."""
     if not inverted_index or not isinstance(inverted_index, dict):
@@ -239,7 +251,7 @@ def works_tables(works, root_institution=None):
             logger.warning("skipping malformed work %s: %s", work_id, exc)
             continue
         for name, items in work_rows.items():
-            rows[name].extend(items)
+            rows[name].extend({k: _valid_text(v) for k, v in item.items()} for item in items)
     return {
         name: pd.DataFrame(rows[name], columns=COLUMNS[name]).astype(DTYPES[name])
         for name in COLUMNS
