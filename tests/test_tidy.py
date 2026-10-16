@@ -148,11 +148,10 @@ def test_authors_count_and_truncation():
         {"id": "https://openalex.org/W10", "authorships": authorships, "authors_count": 250},
         {"id": "https://openalex.org/W11", "authorships": authorships[:3], "authors_count": 3},
         {"id": "https://openalex.org/W12", "authorships": authorships[:3]},
-        {"id": "https://openalex.org/W13", "authorships": authorships, "is_authors_truncated": True},
+        {"id": "https://openalex.org/W13", "authorships": authorships[:99]},
+        {"id": "https://openalex.org/W14", "authorships": authorships},  # live case: cut at 100, no flag
+        {"id": "https://openalex.org/W15", "authorships": authorships[:3], "is_authors_truncated": True},
     ]
     frame = works_tables(works)["works"].set_index("work_id")
-    assert list(frame.n_authors) == [250, 3, 3, 100]
-    assert frame.loc["W10", "authors_truncated"] == True  # noqa: E712
-    assert frame.loc["W11", "authors_truncated"] == False  # noqa: E712
-    assert pd.isna(frame.loc["W12", "authors_truncated"])
-    assert frame.loc["W13", "authors_truncated"] == True  # noqa: E712
+    assert list(frame.n_authors) == [250, 3, 3, 99, 100, 3]
+    assert [bool(v) for v in frame.authors_truncated] == [True, False, False, False, True, True]

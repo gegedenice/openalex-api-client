@@ -13,6 +13,8 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["works_tables", "reconstruct_abstract", "short_id", "write_parquet", "iter_cached_works"]
 
+LIST_AUTHORS_CAP = 100  # authorships kept per work in list results
+
 COLUMNS = {
     "works": [
         "work_id", "doi", "title", "abstract", "has_abstract", "publication_date", "publication_year",
@@ -95,13 +97,17 @@ def _work_rows(work, root):
     primary = work.get("primary_topic") or {}
     source = _get(work, "primary_location", "source") or {}
     authorships = work.get("authorships") or []
-    # No truncation flag was seen in live list results (October 2026). If OpenAlex gives a
-    # total author count, it wins over the length of a possibly shortened authorships list.
+    # List results cut authorships at 100 without any flag (checked October 2026: a work with
+    # 2,467 authors came back with 100). A list of 100 or more is therefore marked as possibly
+    # truncated, so the caller can re-read it with a (free) singleton get.
     authors_count = work.get("authors_count")
     n_authors = authors_count if isinstance(authors_count, int) else len(authorships)
     truncated = work.get("is_authors_truncated")
-    if truncated is None and isinstance(authors_count, int):
-        truncated = authors_count > len(authorships)
+    if truncated is None:
+        if isinstance(authors_count, int):
+            truncated = authors_count > len(authorships)
+        else:
+            truncated = len(authorships) >= LIST_AUTHORS_CAP
 
     rows = {name: [] for name in COLUMNS}
     rows["works"].append({
