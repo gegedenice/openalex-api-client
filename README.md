@@ -222,9 +222,11 @@ silently returning partial results or `0`. Use `tidy.works_tables` instead of di
 Still assumed:
 
 - `select` accepts root-level fields only.
-- The truncated-author-list flag in list results is `is_authors_truncated`
-  (read into `works.authors_truncated`). A work with 33 authors had no such key, which is
-  expected if the flag only appears on works with more than 100 authors; not yet seen on one.
+- Author lists in list results. Works filtered with `authors_count:>100` and `authors_count:>150`
+  came back with 100 and 150 authorships and no truncation flag (no `is_authors_truncated` key).
+  `tidy` therefore takes `n_authors` from `authors_count` when the record has it, else from the
+  length of `authorships`; `authors_truncated` is `is_authors_truncated` if present, else
+  `authors_count > len(authorships)`, else null.
 
 ## Tests
 

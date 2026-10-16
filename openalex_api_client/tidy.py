@@ -95,7 +95,13 @@ def _work_rows(work, root):
     primary = work.get("primary_topic") or {}
     source = _get(work, "primary_location", "source") or {}
     authorships = work.get("authorships") or []
+    # No truncation flag was seen in live list results (October 2026). If OpenAlex gives a
+    # total author count, it wins over the length of a possibly shortened authorships list.
+    authors_count = work.get("authors_count")
+    n_authors = authors_count if isinstance(authors_count, int) else len(authorships)
     truncated = work.get("is_authors_truncated")
+    if truncated is None and isinstance(authors_count, int):
+        truncated = authors_count > len(authorships)
 
     rows = {name: [] for name in COLUMNS}
     rows["works"].append({
@@ -123,7 +129,7 @@ def _work_rows(work, root):
         "field": _get(primary, "field", "display_name"),
         "domain_id": short_id(_get(primary, "domain", "id")),
         "domain": _get(primary, "domain", "display_name"),
-        "n_authors": len(authorships),
+        "n_authors": n_authors,
         "authors_truncated": bool(truncated) if truncated is not None else None,
         "updated_date": work.get("updated_date"),
     })
