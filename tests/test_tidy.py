@@ -155,3 +155,15 @@ def test_authors_count_and_truncation():
     frame = works_tables(works)["works"].set_index("work_id")
     assert list(frame.n_authors) == [250, 3, 3, 99, 100, 3]
     assert [bool(v) for v in frame.authors_truncated] == [True, False, False, False, True, True]
+
+
+def test_lone_surrogates_are_replaced(tmp_path):
+    raw = json.loads('{"id": "https://openalex.org/W9", "title": "Math \\ud835 symbol \\ud835\\udc00",'
+                     ' "abstract_inverted_index": {"bad\\udc00": [0]},'
+                     ' "authorships": [{"author": {"display_name": "X\\ud800"}, "institutions": []}]}')
+    tables = works_tables([raw])
+    works = tables["works"]
+    assert works.title[0] == "Math \ufffd symbol \U0001d400"  # the valid pair is kept
+    assert works.abstract[0] == "bad\ufffd"
+    assert tables["authorships"].author_name[0] == "X\ufffd"
+    write_parquet(tables, tmp_path)  # pyarrow accepts the result
