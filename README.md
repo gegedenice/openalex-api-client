@@ -48,7 +48,7 @@ oa = OpenAlex()                                   # key read from OPENALEX_API_K
 
 # Research Signal Radar universe — pasted URL
 oa.count_url("https://api.openalex.org/works?filter=authorships.institutions.lineage:I4210166444,"
-             "type:article,publication_year:2020-2025,is_retracted:false")   # ≈ 47,851 in Oct 2026
+             "type:article,publication_year:2020-2025,is_retracted:false")   # 47,848 in Oct 2026 (77,831 for 2016–2025)
 
 # IRD study — partner countries of IRD articles linked to SDG 14, 2021–2025 (dict form)
 ird = {"authorships.institutions.lineage": "I4210166444", "type": "article", "is_retracted": "false"}
@@ -205,17 +205,20 @@ thin wrapper over `OpenAlex`, emitting `DeprecationWarning`. `digest=True` is av
 Differences: `list_all_*` uses cursor paging (no 10,000 limit) and errors are raised instead of
 silently returning partial results or `0`. Use `tidy.works_tables` instead of digests.
 
-## To verify against the live API
+## Checked against the live API (October 2026)
 
-These points could not be checked offline and are assumptions in the code:
+- `group_by` follows cursors, and `:include_unknown` keeps the unknown group (the client appends it
+  unless the field already has a `:` suffix): confirmed.
+- `translate` (`POST /query`) answers with `oql` (normalized, e.g. `get works where published in
+  2020`) and `oqo`. `classic_url`, `valid` and `errors` came back empty for an OQL input.
+- `authorships.institutions.lineage` has no known OQL equivalent: `institution is (…)` may match the
+  exact institution only. Harvests that need child units stay on classic filters.
+
+Still assumed:
 
 - `select` accepts root-level fields only.
-- `group_by` follows cursors, and `:include_unknown` keeps the unknown group (the client appends it
-  unless the field already has a `:` suffix).
-- The truncated-author-list flag is `is_authors_truncated`.
-- The request body of `/query` (`{"oql": …}` or `{"url": …}`) used by `translate`.
-- Whether `authorships.institutions.lineage` has an OQL equivalent (`institution is (…)` may match
-  the exact institution only).
+- The truncated-author-list flag in list results is `is_authors_truncated`
+  (read into `works.authors_truncated`).
 
 ## Tests
 
