@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "openalex-api-client"
+version = "1.0.0"
+description = "A small, generic, dependable Python client for the OpenAlex API, with tidy tables"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Géraldine Geoffroy", email = "grldn.geoffroy@gmail.com" }]
+requires-python = ">=3.10"
+dependencies = ["requests>=2.28"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+]
+
+[project.optional-dependencies]
+tables = ["pandas>=1.5", "pyarrow>=12"]
+dev = ["pytest>=7", "pandas>=1.5", "pyarrow>=12"]
+
+[project.urls]
+Source = "https://github.com/gegedenice/openalex-api-client"
+"Bug Reports" = "https://github.com/gegedenice/openalex-api-client/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["openalex_api_client"]
+
+[tool.hatch.build.targets.sdist]
+include = ["openalex_api_client", "tests", "README.md", "LICENSE"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

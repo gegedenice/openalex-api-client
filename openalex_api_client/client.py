@@ -1,453 +1,451 @@
-# -*- coding: utf-8 -*-
-import requests
+"""The OpenAlex client: one generic API for every entity, cursor paging, retries, page cache."""
+
+import gzip
 import json
-from collections import defaultdict
-import re
-import json
-from datetime import datetime
 import logging
+import math
+import os
+import random
+import re
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from urllib.parse import urlencode
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+import requests
 
-class OpenAlexClientError(Exception):
-    """Custom exception class for OpenAlexClient errors."""
-    pass
+from .errors import BudgetExhausted, HTTPError, OpenAlexError, PaginationError
+from .query import filter_to_string, join_fields, parse_url, short_id
 
-class OpenAlexParser:
-    """Parser class for OpenAlex JSON responses that provides digested data."""
-    
-    @staticmethod
-    def merge_and_deduplicate(data):
-        """Merges and deduplicates data with array indices."""
-        merged_data = defaultdict(set)
-        for key, value in data.items():
-            if re.search(r'\[\d+\]', key):
-                normalized_key = re.sub(r'\[\d+\]', '', key)
-                merged_data[normalized_key].add(value)
-            else:
-                merged_data[key] = {value}
-        return {k: '|'.join(sorted(v)) if len(v) > 1 else next(iter(v)) for k, v in merged_data.items()}
+logger = logging.getLogger(__name__)
 
-    @staticmethod
-    def find_display_names(obj, path=""):
-        """Recursively finds all display_name fields in the JSON object."""
-        if isinstance(obj, dict):
-            for key, value in obj.items():
-                new_path = f"{path}.{key}" if path else key
-                if "display_name" in key:
-                    yield new_path, value
-                else:
-                    yield from OpenAlexParser.find_display_names(value, new_path)
-        elif isinstance(obj, list):
-            for index, item in enumerate(obj):
-                new_path = f"{path}[{index}]"
-                yield from OpenAlexParser.find_display_names(item, new_path)
+RETRY_STATUSES = {429, 500, 502, 503, 504}
+MAX_PER_PAGE = 100
+MAX_SAMPLE = 10_000
+_GROUP_BY_RE = re.compile(r"\bgroup\s+by\b", re.IGNORECASE)
+_KEY_IN_TEXT_RE = re.compile(r"(api_key=)[^&\s'\"]+")
 
-    @staticmethod
-    def extract_unique_country_codes(authorships):
-        """Extracts unique country codes from authorships."""
-        country_codes = set()
-        for author in authorships:
-            country_codes.update(author.get('countries', []))
-        return '|'.join(sorted(country_codes))
 
-    @staticmethod
-    def convert_publication_date(publication_date_str):
-        """Converts a publication date string to ISO format."""
-        try:
-            dt = datetime.strptime(publication_date_str, '%Y-%m-%d')
-            return dt.isoformat() + 'Z'
-        except ValueError:
-            return None
+@dataclass
+class Usage:
+    """Budget information read from the X-RateLimit-* headers of the last response."""
 
-    @staticmethod
-    def extract_abstract(abstract_inverted_index):
-        """Convert an abstract_inverted_index into a readable text format."""
-        if not abstract_inverted_index:
-            return "No abstract available"
-        abstract_length = max(max(pos) for pos in abstract_inverted_index.values()) + 1
-        abstract_words = [""] * abstract_length
-        for word, positions in abstract_inverted_index.items():
-            for pos in positions:
-                abstract_words[pos] = word
-        return " ".join(word for word in abstract_words if word)
+    limit: float | None = None
+    remaining: float | None = None
+    credits_used_total: float = 0
+    reset_seconds: float | None = None
 
-    @staticmethod
-    def parse_work(work_data, include_abstract=False):
-        """Parses a work JSON object into a digested format."""
-        parsed_data = {}
-        
-        # Basic fields
-        basic_fields = ['id', 'doi', 'title', 'publication_year', 'language', 'type']
-        for field in basic_fields:
-            try:
-                if field == 'doi':
-                    parsed_data[field] = work_data.get(field, '')
-                else:
-                    parsed_data[field] = work_data.get(field)
-            except Exception as e:
-                logging.warning(f"Error parsing {field}: {e}")
 
-        # IDs
-        try:
-            ids = work_data.get('ids', {})
-            parsed_data['pmid'] = ids.get('pmid', '')
-            parsed_data['mag'] = ids.get('mag', '')
-        except Exception as e:
-            logging.warning(f"Error parsing IDs: {e}")
+def _header(headers, name):
+    for key, value in (headers or {}).items():
+        if key.lower() == name.lower():
+            return value
+    return None
 
-        # APC paid
-        try:
-            apc_paid_value = work_data.get('apc_paid')
-            if isinstance(apc_paid_value, dict):
-                parsed_data['apc_paid'] = apc_paid_value.get('value_usd')
-            else:
-                parsed_data['apc_paid'] = apc_paid_value
-        except Exception as e:
-            logging.warning(f"Error parsing apc_paid: {e}")
 
-        # Counts
-        count_fields = ['referenced_works_count', 'cited_by_count', 'countries_distinct_count',
-                       'institutions_distinct_count', 'locations_count', 'fwci']
-        for field in count_fields:
-            try:
-                parsed_data[field] = work_data.get(field)
-            except Exception as e:
-                logging.warning(f"Error parsing {field}: {e}")
+def _number(value):
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return int(number) if number.is_integer() else number
 
-        # Primary location
-        try:
-            primary_location = work_data.get('primary_location', {}).get('source', {})
-            parsed_data['primary_location_display_name'] = primary_location.get('display_name')
-            parsed_data['primary_location_host_organization_name'] = primary_location.get('host_organization_name')
-        except Exception as e:
-            logging.warning(f"Error parsing primary_location: {e}")
 
-        # Publication date
-        try:
-            publication_date = work_data.get('publication_date')
-            if publication_date:
-                parsed_data['publication_date'] = OpenAlexParser.convert_publication_date(publication_date)
-        except Exception as e:
-            logging.warning(f"Error parsing publication_date: {e}")
+def _normalize_group(group):
+    key = group.get("key")
+    if key in ("", "unknown"):
+        key = None
+    return {"key": key, "key_display_name": group.get("key_display_name"), "count": group.get("count")}
 
-        # Percentiles
-        try:
-            percentiles = work_data.get('citation_normalized_percentile', {})
-            for key, value in percentiles.items():
-                parsed_data[f"percentiles_{key}"] = value
-        except Exception as e:
-            logging.warning(f"Error parsing citation_normalized_percentile: {e}")
 
-        # Open access
-        try:
-            open_access = work_data.get('open_access', {})
-            parsed_data['open_access_is_oa'] = open_access.get('is_oa')
-            parsed_data['open_access_oa_status'] = open_access.get('oa_status')
-        except Exception as e:
-            logging.warning(f"Error parsing open_access: {e}")
+def _json_normalized(value):
+    return json.loads(json.dumps(value, sort_keys=True, default=str))
 
-        # Grants
-        try:
-            grants = work_data.get('grants', [])
-            for i, grant in enumerate(grants):
-                parsed_data[f"grants[{i}]_funder_display_name"] = grant.get("funder_display_name")
-        except Exception as e:
-            logging.warning(f"Error parsing grants: {e}")
 
-        # Country codes
-        try:
-            parsed_data["countries_codes"] = OpenAlexParser.extract_unique_country_codes(work_data.get("authorships", []))
-        except Exception as e:
-            logging.warning(f"Error parsing countries_codes: {e}")
+class _PageCache:
+    """Pages of one harvest under `cache_dir/name/`, plus the params that produced them."""
 
-        # Display names
-        try:
-            display_names = {}
-            for path, value in OpenAlexParser.find_display_names(work_data):
-                if ("authorships" in path or "topics" in path or "keywords" in path or 
-                    "sustainable_development_goals" in path) and "display_name" in path:
-                    if path not in display_names:
-                        display_names[path] = []
-                    display_names[path].append(value)
-            # After collecting all values, limit to first 10 if needed (preventing massive authorships for example)
-            for path in display_names:
-                if len(display_names[path]) > 10:
-                    display_names[path] = display_names[path][:10]
-                    
-            for path, values in display_names.items():
-                parsed_data[path.replace(".","_")] = "|".join(values)
-        except Exception as e:
-            logging.warning(f"Error parsing display_names: {e}")
+    def __init__(self, directory, signature):
+        self.directory = Path(directory)
+        self.directory.mkdir(parents=True, exist_ok=True)
+        signature = _json_normalized(signature)
+        params_file = self.directory / "params.json"
+        if params_file.exists():
+            stored = json.loads(params_file.read_text(encoding="utf-8"))
+            if stored != signature:
+                raise PaginationError(
+                    f"checkpoint {self.directory.name!r} was created with different params; "
+                    f"use another checkpoint name or delete {self.directory}"
+                )
+        else:
+            params_file.write_text(json.dumps(signature, indent=2, sort_keys=True), encoding="utf-8")
+        self.signature = signature
 
-        # Abstract
-        if include_abstract:
-            try:
-                parsed_data['abstract'] = OpenAlexParser.extract_abstract(work_data.get('abstract_inverted_index'))
-            except Exception as e:
-                logging.warning(f"Error parsing abstract: {e}")
-        return OpenAlexParser.merge_and_deduplicate(parsed_data)
+    def pages(self):
+        for path in sorted(self.directory.glob("page-*.json.gz")):
+            with gzip.open(path, "rt", encoding="utf-8") as fh:
+                yield json.load(fh)
 
-class OpenAlexClient:
-    """
-    A Python client for interacting with the OpenAlex API.
-    Handles authentication, basic requests, and pagination for common endpoints.
+    def write(self, number, cursor, response):
+        path = self.directory / f"page-{number:05d}.json.gz"
+        tmp = path.with_suffix(".tmp")
+        entry = {"params": self.signature, "cursor": cursor, "response": response}
+        with gzip.open(tmp, "wt", encoding="utf-8") as fh:
+            json.dump(entry, fh)
+        tmp.replace(path)  # atomic: an interrupted write never leaves a half page
+
+
+class OpenAlex:
+    """Client for the OpenAlex REST API.
+
+    Every method takes an entity path (`works`, `authors`, `institutions`, `topics`,
+    `subfields`, `sources`, ...) and returns plain dicts and lists.
     """
 
-    # Endpoint constants
-    WORKS = "works"
-    INSTITUTIONS = "institutions"
-    AUTHORS = "authors"
-    TOPICS = "topics"
-    FUNDERS = "funders"
-    PUBLISHERS = "publishers"
-
-    def __init__(self, api_key: str = None, default_per_page=10):
-        """
-        Initializes the OpenAlexClient.
-
-        Args:
-            api_key (str, optional): api_key for API identification. Defaults to None.
-            default_per_page (int): Default number of results per page. Defaults to 10.
-        """
-        self.base_url = "https://api.openalex.org"
-        self.api_key = api_key
-        self.default_per_page = default_per_page
-        self.headers = {
-            'Accept': 'application/json',
-            'Accept-Encoding': 'gzip, deflate',  # Explicitly disable Brotli as it's not supported by the API
+    def __init__(
+        self,
+        api_key=None,
+        base_url="https://api.openalex.org",
+        timeout=30,
+        max_retries=6,
+        user_agent="openalex-api-client/1.0",
+        cache_dir=None,
+        max_rps=10,
+        session=None,
+    ):
+        self.api_key = api_key if api_key is not None else (os.environ.get("OPENALEX_API_KEY") or None)
+        self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
+        self.max_retries = max_retries
+        self.cache_dir = Path(cache_dir) if cache_dir else None
+        self.max_rps = max_rps
+        self.session = session if session is not None else requests.Session()
+        self.usage = Usage()
+        self._headers = {
+            "Accept": "application/json",
+            "Accept-Encoding": "gzip, deflate",  # no Brotli
+            "User-Agent": user_agent,
         }
-        # Use a session for connection pooling
-        self.session = requests.Session()
-        self.session.headers.update(self.headers)
-        logging.info(f"OpenAlexClient initialized with api_key: {self.api_key}")
+        self._sleep = time.sleep
+        self._last_request = 0.0
 
-    def _build_params(self, **kwargs):
-        """Helper to build request parameters, including API keys."""
-        params = {"api_key": self.api_key}
-        params.update({k: v for k, v in kwargs.items() if v is not None})
-        return params
+    def __repr__(self):
+        key = "'***'" if self.api_key else None
+        return f"OpenAlex(base_url={self.base_url!r}, api_key={key})"
 
-    def _request(self, method, url, params=None, **kwargs):
-        """Makes an HTTP request to the OpenAlex API."""
+    # ------------------------------------------------------------------ transport
+
+    def _scrub(self, text):
+        text = _KEY_IN_TEXT_RE.sub(r"\1***", str(text))
+        if self.api_key:
+            text = text.replace(self.api_key, "***")
+        return text
+
+    def _display_url(self, url, params):
+        shown = {k: v for k, v in params.items() if k != "api_key"}
+        return url + ("?" + urlencode(shown) if shown else "")
+
+    def _throttle(self):
+        if not self.max_rps:
+            return
+        wait = self._last_request + 1.0 / self.max_rps - time.monotonic()
+        if wait > 0:
+            self._sleep(wait)
+        self._last_request = time.monotonic()
+
+    def _backoff(self, attempt):
+        return min(60, 1.5**attempt) + random.uniform(0, 1)
+
+    def _update_usage(self, headers):
+        limit = _number(_header(headers, "X-RateLimit-Limit"))
+        remaining = _number(_header(headers, "X-RateLimit-Remaining"))
+        used = _number(_header(headers, "X-RateLimit-Credits-Used"))
+        reset = _number(_header(headers, "X-RateLimit-Reset"))
+        if limit is not None:
+            self.usage.limit = limit
+        if remaining is not None:
+            self.usage.remaining = remaining
+        if used is not None:
+            self.usage.credits_used_total += used
+        if reset is not None:
+            self.usage.reset_seconds = reset
+
+    def _http_error(self, response, shown):
+        text = self._scrub(getattr(response, "text", "") or "")
+        validation = None
         try:
-            # Use session instead of requests.request for better connection handling
-            response = self.session.request(method, url, params=params, **kwargs)
-            response.raise_for_status()
-            return response
-        except requests.exceptions.RequestException as e:
-            error_message = f"API request failed ({method} {url}): {e}"
-            if hasattr(e, 'response') and e.response is not None:
-                try:
-                    error_details = e.response.json()
-                    error_message += f"\nStatus Code: {e.response.status_code}"
-                    error_message += f"\nResponse: {json.dumps(error_details, indent=2)}"
-                except json.JSONDecodeError:
-                    error_message += f"\nStatus Code: {e.response.status_code}"
-                    error_message += f"\nResponse Text: {e.response.text[:500]}..."
-            raise OpenAlexClientError(error_message) from e
-
-    def get_resource(self, api_endpoint, resource_id, digest=False, abstract=False):
-        """
-        Fetches a single resource by its ID from a specified endpoint.
-
-        Args:
-            api_endpoint (str): The API endpoint name (e.g., "works", "authors").
-            resource_id (str): The unique ID of the resource.
-            digest (bool): If True, returns digested data using OpenAlexParser.
-            abstract (bool): If True, returns the abstract inside digested data.
-
-        Returns:
-            dict: The JSON representation of the resource or digested data if digest=True.
-        """
-        url = f"{self.base_url}/{api_endpoint}/{resource_id}"
-        params = self._build_params()
-        logging.debug(f"Fetching single resource: GET {url}")
-        response = self._request('GET', url, params=params)
-        data = response.json()
-        
-        if digest and api_endpoint == self.WORKS:
-            return OpenAlexParser.parse_work(data, include_abstract=abstract)
-        return data
-
-    def list_resources(self, api_endpoint, digest=False, abstract=False, **kwargs):
-        """
-        Fetches a single page of resources from an API endpoint.
-
-        Args:
-            api_endpoint (str): The API endpoint name (e.g., "works", "authors").
-            digest (bool): If True, returns digested data using OpenAlexParser.
-            abstract (bool): If True, returns the abstract inside digested data.
-            **kwargs: Query parameters (page, per_page, sort_by, etc.).
-
-        Returns:
-            dict: A dictionary containing the results and metadata.
-        """
-        url = f"{self.base_url}/{api_endpoint}"
-        if 'per_page' not in kwargs:
-            kwargs['per_page'] = self.default_per_page
-
-        params = self._build_params(**kwargs)
-        logging.debug(f"Listing resources (single page): GET {url} with params: {params}")
-        response = self._request('GET', url, params=params)
-        data = response.json()
-        
-        if digest and api_endpoint == self.WORKS:
-            #data['results'] = [OpenAlexParser.parse_work(work) for work in data.get('results', [])]
-            data['results'] = [OpenAlexParser.parse_work(work, include_abstract=abstract) for work in data.get('results', [])]
-        return data.get('results', [])
-
-    def get_total_count(self, api_endpoint, **kwargs):
-        """
-        Gets the total count of resources matching the given filters.
-
-        Args:
-            api_endpoint (str): The API endpoint name (e.g., "works", "authors").
-            **kwargs: Query parameters (filter, sort, select, etc.).
-
-        Returns:
-            int: The total count of matching resources.
-        """
-        url = f"{self.base_url}/{api_endpoint}"
-        # Set per_page to 1 to minimize data transfer
-        kwargs['per_page'] = 1
-        params = self._build_params(**kwargs)
-        
-        try:
-            response = self._request('GET', url, params=params)
-            data = response.json()
-            return data.get('meta', {}).get('count', 0)
-        except OpenAlexClientError as e:
-            logging.error(f"Error getting total count: {str(e)}")
-            return 0
-
-    def list_all_resources(self, api_endpoint, digest=False, abstract=False, per_page=None, **kwargs):
-        """
-        Fetches ALL resources from an endpoint, handling pagination.
-
-        Args:
-            api_endpoint (str): The API endpoint name (e.g., "works", "authors").
-            digest (bool): If True, returns digested data using OpenAlexParser.
-            abstract (bool): If True, returns the abstract inside digested data.
-            per_page (int, optional): Results per page. Defaults to client's default_per_page.
-            **kwargs: Additional query parameters (filter, sort, select).
-                      'page' parameter is ignored as pagination is handled internally.
-
-        Returns:
-            list: A list containing JSON representations of ALL matching resources.
-        """
-        if per_page is None:
-            per_page = self.default_per_page
-
-        # Remove page from kwargs if present to avoid conflicts
-        kwargs.pop('page', None)
-        
-        # Get total count using the dedicated method
-        total_count = self.get_total_count(api_endpoint, **kwargs)
-        if total_count == 0:
-            logging.warning(f"No resources found for endpoint '{api_endpoint}' with given filters")
-            return []
-        
-        total_pages = (total_count + per_page - 1) // per_page
-        logging.info(f"Fetching {total_count} resources from {total_pages} pages for endpoint '{api_endpoint}'")
-
-        all_records = []
-        # Fetch all pages
-        for page in range(1, total_pages + 1):
-            try:
-                response = self.list_resources(api_endpoint, digest=digest, abstract=abstract, page=page, per_page=per_page, **kwargs)
-                if response:
-                    all_records.extend(response)
-                    logging.info(f"Fetched page {page}/{total_pages} - Total records so far: {len(all_records)}")
-                else:
-                    logging.warning(f"Empty response for page {page}")
+            body = response.json()
+        except ValueError:
+            body = None
+        if isinstance(body, dict):
+            for key in ("validation", "message", "error"):
+                if body.get(key):
+                    value = body[key]
+                    validation = self._scrub(value if isinstance(value, str) else json.dumps(value))
                     break
-            except OpenAlexClientError as e:
-                logging.error(f"Error fetching page {page}: {str(e)}")
+        return HTTPError(response.status_code, shown, text[:500], validation)
+
+    def _request(self, method, path, params=None, body=None):
+        url = self.base_url + path
+        params = {k: v for k, v in (params or {}).items() if v is not None}
+        shown = self._display_url(url, params)
+        send_params = dict(params)
+        if self.api_key:
+            send_params["api_key"] = self.api_key
+
+        for attempt in range(self.max_retries + 1):
+            self._throttle()
+            logger.debug("%s %s", method, shown)
+            try:
+                response = self.session.request(
+                    method, url, params=send_params, json=body, headers=self._headers, timeout=self.timeout
+                )
+            except (requests.ConnectionError, requests.Timeout) as exc:
+                if attempt == self.max_retries:
+                    raise OpenAlexError(
+                        f"{type(exc).__name__} for {shown} after {attempt + 1} attempts"
+                    ) from None
+                delay = self._backoff(attempt)
+                logger.warning("%s for %s, retrying in %.1f s", type(exc).__name__, shown, delay)
+                self._sleep(delay)
+                continue
+
+            self._update_usage(response.headers)
+            status = response.status_code
+            if status < 400:
+                try:
+                    return response.json()
+                except ValueError:
+                    raise OpenAlexError(f"invalid JSON in response to {shown}") from None
+            if status == 429 and _number(_header(response.headers, "X-RateLimit-Remaining")) == 0:
+                raise BudgetExhausted(self.usage.reset_seconds)
+            if status in RETRY_STATUSES and attempt < self.max_retries:
+                delay = _number(_header(response.headers, "Retry-After"))
+                if delay is None:
+                    delay = self._backoff(attempt)
+                logger.warning("HTTP %s for %s, retrying in %.1f s", status, shown, delay)
+                self._sleep(delay)
+                continue
+            raise self._http_error(response, shown)
+        raise AssertionError("unreachable")
+
+    # ------------------------------------------------------------------ paging
+
+    def _paginate(self, fetch, signature, items_key, max_results=None, checkpoint=None, strict=False):
+        """Follow cursors and yield items. `fetch(cursor)` returns one response page."""
+        if max_results is not None and max_results <= 0:
+            return
+        cache = None
+        if checkpoint:
+            if self.cache_dir is None:
+                raise ValueError("checkpoint requires OpenAlex(cache_dir=...)")
+            cache = _PageCache(self.cache_dir / checkpoint, signature)
+
+        def pages():
+            cursor = "*"
+            number = 0
+            if cache:
+                for entry in cache.pages():
+                    number += 1
+                    data = entry["response"]
+                    yield entry["cursor"], data
+                    cursor = (data.get("meta") or {}).get("next_cursor")
+                    if cursor is None or not data.get(items_key):
+                        return
+                if number:
+                    logger.info("checkpoint %r: replayed %d cached pages", checkpoint, number)
+            while cursor:
+                data = fetch(cursor)
+                number += 1
+                if cache:
+                    cache.write(number, cursor, data)
+                yield cursor, data
+                cursor = (data.get("meta") or {}).get("next_cursor")
+                if not data.get(items_key):
+                    return
+
+        seen = set()
+        first_count = None
+        warned = False
+        yielded = 0
+        for number, (cursor, data) in enumerate(pages(), start=1):
+            if cursor in seen:
+                raise PaginationError(f"cursor loop detected at page {number}")
+            seen.add(cursor)
+            count = (data.get("meta") or {}).get("count")
+            if first_count is None:
+                first_count = count
+            elif count != first_count and not warned:
+                message = f"meta.count changed during iteration ({first_count} -> {count})"
+                if strict:
+                    raise PaginationError(message)
+                logger.warning(message)
+                warned = True
+            if number % 50 == 0:
+                logger.info("page %d: %d items so far (meta.count=%s)", number, yielded, first_count)
+            for item in data.get(items_key) or []:
+                yield _normalize_group(item) if items_key == "group_by" else item
+                yielded += 1
+                if max_results is not None and yielded >= max_results:
+                    return
+
+    def _iter_get(self, path, params, max_results=None, checkpoint=None, strict=False):
+        params = {k: v for k, v in params.items() if v is not None}
+        per_page = int(params.get("per_page", MAX_PER_PAGE))
+        if per_page > MAX_PER_PAGE:
+            raise ValueError(f"per_page maximum is {MAX_PER_PAGE}")
+        params["per_page"] = per_page
+        items_key = "group_by" if "group_by" in params else "results"
+        signature = {"method": "GET", "path": path, "params": params}
+
+        def fetch(cursor):
+            return self._request("GET", path, {**params, "cursor": cursor})
+
+        return self._paginate(fetch, signature, items_key, max_results, checkpoint, strict)
+
+    @staticmethod
+    def _path(entity):
+        return "/" + entity.strip("/")
+
+    @staticmethod
+    def _group_field(field):
+        # Keep the unknown/null group (OpenAlex leaves it out unless asked).
+        return field if ":" in field else f"{field}:include_unknown"
+
+    # ------------------------------------------------------------------ public API
+
+    def get(self, entity, id, select=None):
+        """One record by ID. OpenAlex IDs, DOIs, ROR, ORCID... are accepted."""
+        if str(id).startswith(("https://openalex.org/", "http://openalex.org/")):
+            id = short_id(id)
+        return self._request("GET", f"{self._path(entity)}/{id}", {"select": join_fields(select)})
+
+    def count(self, entity, filter=None, search=None, **params):
+        """`meta.count` for a query (one list call)."""
+        data = self._request(
+            "GET",
+            self._path(entity),
+            {**params, "filter": filter_to_string(filter), "search": search, "per_page": 1},
+        )
+        return int((data.get("meta") or {}).get("count") or 0)
+
+    def iter(
+        self,
+        entity,
+        filter=None,
+        search=None,
+        select=None,
+        sort=None,
+        per_page=100,
+        max_results=None,
+        checkpoint=None,
+        strict=False,
+        **params,
+    ):
+        """Iterate over all results with cursor paging.
+
+        With `checkpoint="name"` (and `cache_dir` set), every page is cached and a rerun
+        replays the cached pages, then resumes from the last cursor.
+        """
+        query = {
+            **params,
+            "filter": filter_to_string(filter),
+            "search": search,
+            "select": join_fields(select),
+            "sort": join_fields(sort),
+            "per_page": per_page,
+        }
+        return self._iter_get(self._path(entity), query, max_results, checkpoint, strict)
+
+    def list(self, entity, **kwargs):
+        """Same arguments as `iter`; returns a list."""
+        return list(self.iter(entity, **kwargs))
+
+    def group_by(self, entity, field, filter=None, search=None, **params):
+        """All groups `[{"key", "key_display_name", "count"}]`, following cursors.
+
+        The unknown/null group is kept with `key=None`.
+        """
+        query = {
+            **params,
+            "filter": filter_to_string(filter),
+            "search": search,
+            "group_by": self._group_field(field),
+        }
+        return list(self._iter_get(self._path(entity), query))
+
+    def sample(self, entity, n=500, seed=42, filter=None, search=None, select=None, **params):
+        """A random sample of `n` records (at most 10,000), reproducible with `seed`."""
+        if n > MAX_SAMPLE:
+            raise ValueError(f"sample maximum is {MAX_SAMPLE}")
+        per_page = min(MAX_PER_PAGE, n)
+        query = {
+            **params,
+            "filter": filter_to_string(filter),
+            "search": search,
+            "select": join_fields(select),
+            "sample": n,
+            "seed": seed,
+            "per_page": per_page,
+        }
+        results = []
+        for page in range(1, math.ceil(n / per_page) + 1):
+            data = self._request("GET", self._path(entity), {**query, "page": page})
+            batch = data.get("results") or []
+            results.extend(batch)
+            if not batch or len(results) >= n:
                 break
+        return results[:n]
 
-        logging.info(f"Completed fetching {len(all_records)} resources from endpoint '{api_endpoint}'")
-        return all_records
+    # -- pasted URLs
 
-    # Convenience methods for common endpoints
-    def get_work(self, work_id, digest=False, abstract=False,):
-        """Fetches a single work by ID."""
-        return self.get_resource(self.WORKS, work_id, digest=digest, abstract=abstract)
+    def iter_url(self, url, max_results=None, checkpoint=None, strict=False):
+        """Iterate over a pasted api.openalex.org / openalex.org URL (groups if it has group_by)."""
+        path, params = parse_url(url)
+        return self._iter_get(path, params, max_results, checkpoint, strict)
 
-    def list_works(self, digest=False, abstract=False, **kwargs):
-        """Fetches a single page of works."""
-        return self.list_resources(self.WORKS, digest=digest, abstract=abstract, **kwargs)
+    def list_url(self, url, **kwargs):
+        return list(self.iter_url(url, **kwargs))
 
-    def list_all_works(self, digest=False, abstract=False,per_page=None, **kwargs):
-        """Fetches ALL works, handling pagination."""
-        return self.list_all_resources(self.WORKS, digest=digest, abstract=abstract, per_page=per_page, **kwargs)
+    def count_url(self, url):
+        path, params = parse_url(url)
+        params.pop("group_by", None)
+        data = self._request("GET", path, {**params, "per_page": 1})
+        return int((data.get("meta") or {}).get("count") or 0)
 
-    # -- Institutions --
-    def get_institution(self, institution_id):
-        """Fetches a single media resource by ID."""
-        # Your read_media_file logic maps here
-        return self.get_resource(self.INSTITUTIONS, institution_id)
+    # -- OQL
 
-    def list_institutions(self, **kwargs):
-        """Fetches a single page of media resources."""
-        # Your read_media_files logic maps here (for one page)
-        return self.list_resources(self.INSTITUTIONS, **kwargs)
+    def iter_oql(self, query, select=None, sort=None, per_page=100, max_results=None, strict=False):
+        """Iterate over an OQL query (POST /). Yields groups if the query has `group by`."""
+        if per_page > MAX_PER_PAGE:
+            raise ValueError(f"per_page maximum is {MAX_PER_PAGE}")
+        body = {"oql": query, "per_page": per_page, "select": join_fields(select), "sort": join_fields(sort)}
+        body = {k: v for k, v in body.items() if v is not None}
+        items_key = "group_by" if _GROUP_BY_RE.search(query) else "results"
 
-    def list_all_institutions(self, per_page=None, **kwargs):
-        """Fetches ALL media resources, handling pagination."""
-        # Your read_media_files logic maps here (for all pages)
-        return self.list_all_resources(self.INSTITUTIONS, per_page=per_page, **kwargs)
+        def fetch(cursor):
+            return self._request("POST", "/", body={**body, "cursor": cursor})
 
-    # -- Authors --
-    def get_author(self, author_id):
-        """Fetches a single item set (collection) by ID."""
-        return self.get_resource(self.AUTHORS, author_id)
+        return self._paginate(fetch, {"method": "POST", "body": body}, items_key, max_results, None, strict)
 
-    def list_authors(self, **kwargs):
-        """Fetches a single page of item sets (collections)."""
-        return self.list_resources(self.AUTHORS, **kwargs)
+    def oql(self, query, **kwargs):
+        """Run an OQL query; returns the results, or the groups for a `group by` query."""
+        return list(self.iter_oql(query, **kwargs))
 
-    def list_all_authors(self, per_page=None, **kwargs):
-        """Fetches ALL item sets (collections), handling pagination."""
-        return self.list_all_resources(self.AUTHORS, per_page=per_page, **kwargs)
+    def translate(self, text):
+        """Translate and validate a classic URL or an OQL query via /query, without running it.
 
-    # -- Topics --
-    def get_topic(self, topic_id):
-        """Fetches a single resource template by ID."""
-        return self.get_resource(self.TOPICS, topic_id)
-
-    def list_topics(self, **kwargs):
-        """Fetches a single page of resource templates."""
-        return self.list_resources(self.TOPICS, **kwargs)
-
-    def list_all_topics(self, per_page=None, **kwargs):
-        """Fetches ALL resource templates, handling pagination."""
-        return self.list_all_resources(self.TOPICS, per_page=per_page, **kwargs)
-
-    # -- Funders --
-    def get_funder(self, funder_id):
-        """Fetches a single site by ID."""
-        return self.get_resource(self.FUNDERS, funder_id)
-
-    def list_funders(self, **kwargs):
-        """Fetches a single page of sites."""
-        return self.list_resources(self.FUNDERS, **kwargs)
-
-    def list_all_funders(self, per_page=None, **kwargs):
-        """Fetches ALL sites, handling pagination."""
-        return self.list_all_resources(self.FUNDERS, per_page=per_page, **kwargs)
-
-    # -- Publishers --
-    def get_publisher(self, publisher_id):
-        """Fetches a single resource class by ID."""
-        return self.get_resource(self.PUBLISHERS, publisher_id)
-
-    def list_publishers(self, **kwargs):
-        """Fetches a single page of resource classes."""
-        return self.list_resources(self.PUBLISHERS, **kwargs)
-
-    def list_all_publishers(self, per_page=None, **kwargs):
-        """Fetches ALL resource classes, handling pagination."""
-        return self.list_all_resources(self.PUBLISHERS, per_page=per_page, **kwargs)
-
+        Returns `{"oql", "oqo", "classic_url", "valid", "errors"}`.
+        """
+        is_url = text.strip().lower().startswith(("http://", "https://"))
+        body = {"url": text} if is_url else {"oql": text}
+        keys = ("oql", "oqo", "classic_url", "valid", "errors")
+        try:
+            data = self._request("POST", "/query", body=body)
+        except HTTPError as exc:
+            if exc.status != 400:
+                raise
+            return {**dict.fromkeys(keys), "valid": False, "errors": [exc.validation or exc.body_excerpt]}
+        return {k: data.get(k) for k in keys}
