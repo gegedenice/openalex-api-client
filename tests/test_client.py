@@ -193,22 +193,35 @@ def test_oql_group_by_returns_groups(make_client):
 
 
 def test_oql_400_surfaces_validation(make_client):
-    body = {"error": "Invalid query", "validation": {"errors": ["Unknown field 'colour'"]}}
+    body = {"valid": False, "errors": [{"type": "bad_request", "message": "Unknown field 'colour'",
+                                        "location": None}], "warnings": []}
     oa, _, _ = make_client([FakeResponse(400, body), FakeResponse(400, body)])
     with pytest.raises(HTTPError) as info:
         oa.oql("works where colour is (red)")
-    assert "Unknown field 'colour'" in str(info.value)
+    assert info.value.validation == "Unknown field 'colour'"
     translated = oa.translate("works where colour is (red)")
-    assert translated["valid"] is False and "Unknown field" in translated["errors"][0]
+    assert translated["valid"] is False and translated["errors"] == ["Unknown field 'colour'"]
 
 
-def test_translate_returns_known_keys(make_client):
-    body = {"oql": "works where ...", "oqo": {}, "classic_url": "https://api.openalex.org/works?filter=x",
-            "valid": True, "errors": [], "extra": 1}
+def test_translate_oql_maps_live_response(make_client):
+    # shape of the live /query answer (October 2026), trimmed
+    body = {"oxurl": "/works?filter=publication_year:2020", "oql": "get works where published in 2020",
+            "oql_oneline": "get works where published in 2020",
+            "oqo": {"get_rows": "works", "filter_rows": [{"column_id": "publication_year", "value": 2020}]},
+            "validation": {"valid": True, "errors": [], "warnings": []}}
     oa, session, _ = make_client([FakeResponse(200, body)])
-    result = oa.translate("https://api.openalex.org/works?filter=x")
-    assert set(result) == {"oql", "oqo", "classic_url", "valid", "errors"}
-    assert session.calls[0]["url"].endswith("/query")
+    result = oa.translate("works where year is (2020)")
+    assert session.calls[0]["url"] == "https://api.openalex.org/query"
+    assert session.calls[0]["json"] == {"oql": "works where year is (2020)"}
+    assert result == {"oql": "get works where published in 2020", "oqo": body["oqo"],
+                      "classic_url": "https://api.openalex.org/works?filter=publication_year:2020",
+                      "valid": True, "errors": []}
+
+
+def test_translate_url_is_sent_as_oxurl(make_client):
+    oa, session, _ = make_client([FakeResponse(200, {"oql": "get works", "validation": {"valid": True}})])
+    oa.translate(f"https://openalex.org/works?filter={IRD}&page=2&api_key=abc")
+    assert session.calls[0]["json"] == {"oxurl": f"/works?filter={IRD}"}
 
 
 # 6. group_by -------------------------------------------------------------------------

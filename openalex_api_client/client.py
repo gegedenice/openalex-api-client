@@ -180,11 +180,17 @@ class OpenAlex:
         except ValueError:
             body = None
         if isinstance(body, dict):
-            for key in ("validation", "message", "error"):
-                if body.get(key):
-                    value = body[key]
-                    validation = self._scrub(value if isinstance(value, str) else json.dumps(value))
-                    break
+            errors = body.get("errors") or (body.get("validation") or {}).get("errors")
+            if isinstance(errors, list) and errors:
+                # /query and OQL: {"valid": false, "errors": [{"type", "message", "location"}]}
+                messages = [e.get("message", json.dumps(e)) if isinstance(e, dict) else str(e) for e in errors]
+                validation = self._scrub("; ".join(messages))
+            else:
+                for key in ("validation", "message", "error"):
+                    if body.get(key):
+                        value = body[key]
+                        validation = self._scrub(value if isinstance(value, str) else json.dumps(value))
+                        break
         return HTTPError(response.status_code, shown, text[:500], validation)
 
     def _request(self, method, path, params=None, body=None):
@@ -439,8 +445,12 @@ class OpenAlex:
 
         Returns `{"oql", "oqo", "classic_url", "valid", "errors"}`.
         """
-        is_url = text.strip().lower().startswith(("http://", "https://"))
-        body = {"url": text} if is_url else {"oql": text}
+        if text.strip().lower().startswith(("http://", "https://")):
+            path, params = parse_url(text)
+            query = urlencode(params, safe=":,|!<>*/")
+            body = {"oxurl": path + ("?" + query if query else "")}
+        else:
+            body = {"oql": text}
         keys = ("oql", "oqo", "classic_url", "valid", "errors")
         try:
             data = self._request("POST", "/query", body=body)
@@ -448,4 +458,12 @@ class OpenAlex:
             if exc.status != 400:
                 raise
             return {**dict.fromkeys(keys), "valid": False, "errors": [exc.validation or exc.body_excerpt]}
-        return {k: data.get(k) for k in keys}
+        validation = data.get("validation") or {}
+        oxurl = data.get("oxurl")
+        return {
+            "oql": data.get("oql"),
+            "oqo": data.get("oqo"),
+            "classic_url": self.base_url + oxurl if oxurl else None,
+            "valid": validation.get("valid"),
+            "errors": validation.get("errors"),
+        }

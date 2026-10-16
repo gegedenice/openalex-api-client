@@ -107,6 +107,7 @@ oa.oql("works where institution is (I4210166444) and type is (article) "
        "and year >= (2020) and year <= (2025)", select="id,title", max_results=None)
 oa.oql("works where year is (2020) group by type")   # returns the groups
 oa.translate("works where year is (2020)")            # {"oql", "oqo", "classic_url", "valid", "errors"}
+oa.translate("https://api.openalex.org/works?filter=publication_year:2020")   # URL -> OQL
 ```
 
 Queries are sent as `POST /` with paging, `select` and `sort` as sibling keys of `oql`.
@@ -209,8 +210,12 @@ silently returning partial results or `0`. Use `tidy.works_tables` instead of di
 
 - `group_by` follows cursors, and `:include_unknown` keeps the unknown group (the client appends it
   unless the field already has a `:` suffix): confirmed.
-- `translate` (`POST /query`) answers with `oql` (normalized, e.g. `get works where published in
-  2020`) and `oqo`. `classic_url`, `valid` and `errors` came back empty for an OQL input.
+- `POST /query` takes a JSON body with one of `oql`, `oqo` or `oxurl` (a relative URL such as
+  `/works?filter=publication_year:2020`). It answers with `oql` (normalized, e.g. `get works where
+  published in 2020`), `oqo`, `oxurl` and `validation: {valid, errors, warnings}`. `translate` sends
+  pasted URLs as `oxurl` and maps the answer to `classic_url` (base URL + `oxurl`), `valid` and
+  `errors`. Errors come back as `{"valid": false, "errors": [{"type", "message", "location"}]}`;
+  their messages are surfaced in `HTTPError.validation`.
 - `authorships.institutions.lineage` has no known OQL equivalent: `institution is (…)` may match the
   exact institution only. Harvests that need child units stay on classic filters.
 
@@ -218,7 +223,8 @@ Still assumed:
 
 - `select` accepts root-level fields only.
 - The truncated-author-list flag in list results is `is_authors_truncated`
-  (read into `works.authors_truncated`).
+  (read into `works.authors_truncated`). A work with 33 authors had no such key, which is
+  expected if the flag only appears on works with more than 100 authors; not yet seen on one.
 
 ## Tests
 
