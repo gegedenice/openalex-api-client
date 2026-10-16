@@ -48,7 +48,7 @@ oa = OpenAlex()                                   # key read from OPENALEX_API_K
 
 # Research Signal Radar universe — pasted URL
 oa.count_url("https://api.openalex.org/works?filter=authorships.institutions.lineage:I4210166444,"
-             "type:article,publication_year:2020-2025,is_retracted:false")   # ≈ 47,851 in Oct 2026
+             "type:article,publication_year:2020-2025,is_retracted:false")   # 47,848 in Oct 2026 (77,831 for 2016–2025)
 
 # IRD study — partner countries of IRD articles linked to SDG 14, 2021–2025 (dict form)
 ird = {"authorships.institutions.lineage": "I4210166444", "type": "article", "is_retracted": "false"}
@@ -107,6 +107,7 @@ oa.oql("works where institution is (I4210166444) and type is (article) "
        "and year >= (2020) and year <= (2025)", select="id,title", max_results=None)
 oa.oql("works where year is (2020) group by type")   # returns the groups
 oa.translate("works where year is (2020)")            # {"oql", "oqo", "classic_url", "valid", "errors"}
+oa.translate("https://api.openalex.org/works?filter=publication_year:2020")   # URL -> OQL
 ```
 
 Queries are sent as `POST /` with paging, `select` and `sort` as sibling keys of `oql`.
@@ -205,17 +206,27 @@ thin wrapper over `OpenAlex`, emitting `DeprecationWarning`. `digest=True` is av
 Differences: `list_all_*` uses cursor paging (no 10,000 limit) and errors are raised instead of
 silently returning partial results or `0`. Use `tidy.works_tables` instead of digests.
 
-## To verify against the live API
+## Checked against the live API (October 2026)
 
-These points could not be checked offline and are assumptions in the code:
+- `group_by` follows cursors, and `:include_unknown` keeps the unknown group (the client appends it
+  unless the field already has a `:` suffix): confirmed.
+- `POST /query` takes a JSON body with one of `oql`, `oqo` or `oxurl` (a relative URL such as
+  `/works?filter=publication_year:2020`). It answers with `oql` (normalized, e.g. `get works where
+  published in 2020`), `oqo`, `oxurl` and `validation: {valid, errors, warnings}`. `translate` sends
+  pasted URLs as `oxurl` and maps the answer to `classic_url` (base URL + `oxurl`), `valid` and
+  `errors`. Errors come back as `{"valid": false, "errors": [{"type", "message", "location"}]}`;
+  their messages are surfaced in `HTTPError.validation`.
+- `authorships.institutions.lineage` has no known OQL equivalent: `institution is (…)` may match the
+  exact institution only. Harvests that need child units stay on classic filters.
+
+Still assumed:
 
 - `select` accepts root-level fields only.
-- `group_by` follows cursors, and `:include_unknown` keeps the unknown group (the client appends it
-  unless the field already has a `:` suffix).
-- The truncated-author-list flag is `is_authors_truncated`.
-- The request body of `/query` (`{"oql": …}` or `{"url": …}`) used by `translate`.
-- Whether `authorships.institutions.lineage` has an OQL equivalent (`institution is (…)` may match
-  the exact institution only).
+- Author lists in list results. Works filtered with `authors_count:>100` and `authors_count:>150`
+  came back with 100 and 150 authorships and no truncation flag (no `is_authors_truncated` key).
+  `tidy` therefore takes `n_authors` from `authors_count` when the record has it, else from the
+  length of `authorships`; `authors_truncated` is `is_authors_truncated` if present, else
+  `authors_count > len(authorships)`, else null.
 
 ## Tests
 
