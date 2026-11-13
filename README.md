@@ -17,8 +17,8 @@ The core depends on `requests` only. The tables need the `[tables]` extra (panda
 ## Installation
 
 ```bash
-pip install "openalex-api-client @ git+https://github.com/gegedenice/openalex-api-client@v1.0.1"
-pip install "openalex-api-client[tables] @ git+https://github.com/gegedenice/openalex-api-client@v1.0.1"
+pip install "openalex-api-client @ git+https://github.com/gegedenice/openalex-api-client@v1.1.0"
+pip install "openalex-api-client[tables] @ git+https://github.com/gegedenice/openalex-api-client@v1.1.0"
 ```
 
 Python ≥ 3.10.
