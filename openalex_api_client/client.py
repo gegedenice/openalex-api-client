@@ -14,8 +14,10 @@ from urllib.parse import urlencode
 
 import requests
 
+from .derive import hydrate as _hydrate
 from .errors import BudgetExhausted, HTTPError, OpenAlexError, PaginationError
 from .query import filter_to_string, join_fields, parse_url, short_id
+from .views import resolve_fields, views as _views
 
 logger = logging.getLogger(__name__)
 
@@ -320,13 +322,32 @@ class OpenAlex:
         # Keep the unknown/null group (OpenAlex leaves it out unless asked).
         return field if ":" in field else f"{field}:include_unknown"
 
+    @staticmethod
+    def _finish(items, hydrators, drop):
+        """Apply hydrators and drop helper fields on each record (lazily for iterators)."""
+        if not hydrators and not drop:
+            return items
+        return (_hydrate(item, hydrators, drop) for item in items)
+
     # ------------------------------------------------------------------ public API
 
-    def get(self, entity, id, select=None):
-        """One record by ID. OpenAlex IDs, DOIs, ROR, ORCID... are accepted."""
+    def views(self, entity="works"):
+        """The named views for an entity: `{name: [top-level fields]}`."""
+        return _views(entity)
+
+    def get(self, entity, id, select=None, view=None, hydrate=None):
+        """One record by ID. OpenAlex IDs, DOIs, ROR, ORCID... are accepted.
+
+        `view`: a view name or a list of names (see `views()`), sent as `select`; combined with
+        `select` by union, `id` always included.
+        `hydrate`: `True`, a name or a list of names (`"abstract"`); derived values go under
+        `record["_derived"]`. Fields fetched only for a hydrator are removed from the result.
+        """
         if str(id).startswith(("https://openalex.org/", "http://openalex.org/")):
             id = short_id(id)
-        return self._request("GET", f"{self._path(entity)}/{id}", {"select": join_fields(select)})
+        select, hydrators, drop = resolve_fields(entity, select, view, hydrate)
+        record = self._request("GET", f"{self._path(entity)}/{id}", {"select": select})
+        return _hydrate(record, hydrators, drop) if hydrators or drop else record
 
     def count(self, entity, filter=None, search=None, **params):
         """`meta.count` for a query (one list call)."""
@@ -348,22 +369,29 @@ class OpenAlex:
         max_results=None,
         checkpoint=None,
         strict=False,
+        view=None,
+        hydrate=None,
         **params,
     ):
         """Iterate over all results with cursor paging.
 
         With `checkpoint="name"` (and `cache_dir` set), every page is cached and a rerun
         replays the cached pages, then resumes from the last cursor.
+        `view` and `hydrate` work as in `get` (pages are cached raw, before hydration).
         """
+        select, hydrators, drop = resolve_fields(entity, select, view, hydrate)
         query = {
             **params,
             "filter": filter_to_string(filter),
             "search": search,
-            "select": join_fields(select),
+            "select": select,
             "sort": join_fields(sort),
             "per_page": per_page,
         }
-        return self._iter_get(self._path(entity), query, max_results, checkpoint, strict)
+        items = self._iter_get(self._path(entity), query, max_results, checkpoint, strict)
+        if "group_by" in params:
+            return items
+        return self._finish(items, hydrators, drop)
 
     def list(self, entity, **kwargs):
         """Same arguments as `iter`; returns a list."""
@@ -382,16 +410,18 @@ class OpenAlex:
         }
         return list(self._iter_get(self._path(entity), query))
 
-    def sample(self, entity, n=500, seed=42, filter=None, search=None, select=None, **params):
+    def sample(self, entity, n=500, seed=42, filter=None, search=None, select=None, view=None, hydrate=None,
+               **params):
         """A random sample of `n` records (at most 10,000), reproducible with `seed`."""
         if n > MAX_SAMPLE:
             raise ValueError(f"sample maximum is {MAX_SAMPLE}")
+        select, hydrators, drop = resolve_fields(entity, select, view, hydrate)
         per_page = min(MAX_PER_PAGE, n)
         query = {
             **params,
             "filter": filter_to_string(filter),
             "search": search,
-            "select": join_fields(select),
+            "select": select,
             "sample": n,
             "seed": seed,
             "per_page": per_page,
@@ -403,7 +433,7 @@ class OpenAlex:
             results.extend(batch)
             if not batch or len(results) >= n:
                 break
-        return results[:n]
+        return list(self._finish(results[:n], hydrators, drop))
 
     # -- pasted URLs
 
@@ -423,18 +453,26 @@ class OpenAlex:
 
     # -- OQL
 
-    def iter_oql(self, query, select=None, sort=None, per_page=100, max_results=None, strict=False):
-        """Iterate over an OQL query (POST /). Yields groups if the query has `group by`."""
+    def iter_oql(self, query, select=None, sort=None, per_page=100, max_results=None, strict=False,
+                 view=None, hydrate=None, entity="works"):
+        """Iterate over an OQL query (POST /). Yields groups if the query has `group by`.
+
+        `view` and `hydrate` work as in `get`; `entity` tells which views apply (default works).
+        """
         if per_page > MAX_PER_PAGE:
             raise ValueError(f"per_page maximum is {MAX_PER_PAGE}")
-        body = {"oql": query, "per_page": per_page, "select": join_fields(select), "sort": join_fields(sort)}
+        select, hydrators, drop = resolve_fields(entity, select, view, hydrate)
+        body = {"oql": query, "per_page": per_page, "select": select, "sort": join_fields(sort)}
         body = {k: v for k, v in body.items() if v is not None}
         items_key = "group_by" if _GROUP_BY_RE.search(query) else "results"
 
         def fetch(cursor):
             return self._request("POST", "/", body={**body, "cursor": cursor})
 
-        return self._paginate(fetch, {"method": "POST", "body": body}, items_key, max_results, None, strict)
+        items = self._paginate(fetch, {"method": "POST", "body": body}, items_key, max_results, None, strict)
+        if items_key == "group_by":
+            return items
+        return self._finish(items, hydrators, drop)
 
     def oql(self, query, **kwargs):
         """Run an OQL query; returns the results, or the groups for a `group by` query."""

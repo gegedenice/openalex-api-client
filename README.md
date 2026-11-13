@@ -32,6 +32,7 @@ oa = OpenAlex()        # key read from the OPENALEX_API_KEY environment variable
 
 oa.get("works", "W2741809807")
 oa.get("works", "https://doi.org/10.7717/peerj.4375")          # DOI, ROR, ORCID… accepted as IDs
+oa.get("works", "W2741809807", view=["oa", "affiliations"], hydrate=True)   # see "Views and hydration"
 oa.count("works", filter="publication_year:2020,is_oa:true")
 for work in oa.iter("works", filter="publication_year:2020", select="id,title", max_results=500):
     ...
@@ -123,9 +124,10 @@ OpenAlex(api_key=None, base_url="https://api.openalex.org", timeout=30, max_retr
 
 | Method | Returns |
 |---|---|
-| `get(entity, id, select=None)` | one record |
+| `get(entity, id, select=None, view=None, hydrate=None)` | one record |
+| `views(entity="works")` | `{view name: [top-level fields]}` |
 | `count(entity, filter=None, search=None)` | `meta.count` |
-| `iter(entity, filter=None, search=None, select=None, sort=None, per_page=100, max_results=None, checkpoint=None, strict=False, **params)` | iterator of records (cursor paging) |
+| `iter(entity, filter=None, search=None, select=None, sort=None, per_page=100, max_results=None, checkpoint=None, strict=False, view=None, hydrate=None, **params)` | iterator of records (cursor paging) |
 | `list(entity, …same…)` | list of records |
 | `group_by(entity, field, filter=None, search=None)` | `[{"key", "key_display_name", "count"}]`, all groups; the unknown group has `key=None` |
 | `sample(entity, n=500, seed=42, filter=None, …)` | `n` random records (n ≤ 10,000) |
@@ -139,6 +141,54 @@ are passed as query parameters. Every method returns plain dicts and lists.
 `iter` stops when `next_cursor` is null or at `max_results`. It raises `PaginationError` on a
 cursor loop. If `meta.count` changes during iteration it logs a warning, or raises with
 `strict=True`.
+
+## Views and hydration
+
+`get`, `iter`, `list`, `sample`, `iter_oql` and `oql` take two optional arguments. Without
+them a record comes back exactly as OpenAlex sends it.
+
+**`view`** names a group of top-level fields and is sent as `select`. Several views and a
+`select` combine by union; `id` is always included.
+
+```python
+oa.get("works", "W2741809807", view="oa")
+oa.get("works", "W2741809807", view=["affiliations", "funding"], select="doi")
+oa.views("works")   # {"core": [...], "oa": [...], ...}
+```
+
+| view | fields |
+|---|---|
+| `core` | id, doi, title, display_name, publication_year, publication_date, type, language |
+| `ids` | id, doi, ids |
+| `oa` | open_access, best_oa_location, primary_location, locations, locations_count, apc_list, apc_paid, has_fulltext |
+| `affiliations` | authorships, corresponding_author_ids, corresponding_institution_ids, institutions_distinct_count, countries_distinct_count |
+| `classification` | primary_topic, topics, keywords, sustainable_development_goals |
+| `impact` | cited_by_count, counts_by_year, fwci, citation_normalized_percentile |
+| `references` | referenced_works_count, referenced_works, related_works |
+| `funding` | grants, awards, funders |
+| `biblio` | primary_location, biblio |
+| `record` | is_retracted, created_date, updated_date |
+
+OpenAlex `select` only takes top-level fields: a view trims the record block by block
+(`authorships` comes back whole). For one row per author × institution, use
+`works_tables([work])["authorships"]`. Views are defined for works only; another entity raises
+`ValueError`, as does an unknown view name. OpenAlex rejects an unknown field with HTTP 400, so
+`tests/test_live.py` checks every view against the live API.
+
+**`hydrate`** adds derived values, computed locally with no extra request, under the record's
+`_derived` key so they never collide with an OpenAlex field. `hydrate=True` applies the default
+set; a name or a list picks hydrators. Available: `abstract` (rebuilt from
+`abstract_inverted_index`, `None` when there is no abstract).
+
+```python
+work = oa.get("works", "W2741809807", view="core", hydrate=True)
+work["_derived"]["abstract"]
+```
+
+If a hydrator needs a field you did not ask for, the client adds it to `select` and removes it
+from the result. A field you asked for, or any field of a full record, is kept. The same
+function works on cached records: `from openalex_api_client import hydrate; hydrate(work)`.
+Checkpointed pages are cached raw, before hydration.
 
 ### Errors
 
@@ -241,6 +291,7 @@ pytest
 ```
 
 No test uses the network: a fake session is injected with `OpenAlex(session=...)`.
+`OPENALEX_LIVE=1 pytest tests/test_live.py` checks every view and the abstract against the live API.
 
 ## License
 

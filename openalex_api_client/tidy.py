@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from .derive import reconstruct_abstract
 from .query import short_id
 
 logger = logging.getLogger(__name__)
@@ -56,19 +57,6 @@ def _valid_text(value):
         return value
     except UnicodeEncodeError:
         return value.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
-
-
-def reconstruct_abstract(inverted_index):
-    """Rebuild an abstract from OpenAlex's `abstract_inverted_index`; `None` when absent."""
-    if not inverted_index or not isinstance(inverted_index, dict):
-        return None
-    positions = {}
-    for word, indexes in inverted_index.items():
-        for index in indexes or []:
-            positions[index] = word
-    if not positions:
-        return None
-    return " ".join(positions[i] for i in sorted(positions))
 
 
 def _bare_doi(doi):
